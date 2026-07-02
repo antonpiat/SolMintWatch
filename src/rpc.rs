@@ -4,11 +4,10 @@ use anyhow::{anyhow, Context, Result};
 use base64::Engine;
 use reqwest::Client;
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use tracing::{debug, warn};
 
 use crate::config::Config;
-use crate::constants::METAPLEX_METADATA_PROGRAM;
+use crate::metadata;
 use crate::types::{
     AccountInfoResult, Instruction, MintEvent, RpcResponse, TokenProgram, TransactionResult,
     is_first_supply_mint, is_mint_to_type,
@@ -101,7 +100,12 @@ impl HeliusRpc {
         };
 
         let (name, symbol) = if self.fetch_metadata {
-            match tokio::time::timeout(self.metadata_timeout, self.fetch_metadata(&mint)).await {
+            match tokio::time::timeout(
+                self.metadata_timeout,
+                metadata::resolve(self, &mint, program),
+            )
+            .await
+            {
                 Ok(Ok(meta)) => meta,
                 Ok(Err(e)) => {
                     warn!(mint, error = %e, "metadata fetch failed");
@@ -128,28 +132,9 @@ impl HeliusRpc {
         }))
     }
 
-    async fn get_transaction(&self, signature: &str) -> Result<Option<TransactionResult>> {
+    pub(crate) async fn get_account_bytes(&self, address: &str) -> Result<Option<Vec<u8>>> {
         let params = json!([
-            signature,
-            {
-                "encoding": "jsonParsed",
-                "commitment": self.commitment,
-                "maxSupportedTransactionVersion": 0
-            }
-        ]);
-
-        let response: RpcResponse<TransactionResult> =
-            self.rpc_call("getTransaction", params).await?;
-        if let Some(err) = response.error {
-            return Err(anyhow!("RPC error {}: {}", err.code, err.message));
-        }
-        Ok(response.result)
-    }
-
-    async fn fetch_metadata(&self, mint: &str) -> Result<(Option<String>, Option<String>)> {
-        let metadata_pda = derive_metadata_pda(mint)?;
-        let params = json!([
-            metadata_pda,
+            address,
             {
                 "encoding": "base64",
                 "commitment": self.commitment
@@ -167,16 +152,33 @@ impl HeliusRpc {
             .and_then(|r| r.value)
             .and_then(|v| v.data.base64_data().map(str::to_string));
 
-        let data_b64 = match data_b64 {
-            Some(d) => d,
-            None => return Ok((None, None)),
+        let Some(data_b64) = data_b64 else {
+            return Ok(None);
         };
 
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(data_b64)
-            .context("invalid base64 metadata")?;
+            .context("invalid base64 account data")?;
 
-        Ok(parse_metaplex_metadata(&bytes))
+        Ok(Some(bytes))
+    }
+
+    async fn get_transaction(&self, signature: &str) -> Result<Option<TransactionResult>> {
+        let params = json!([
+            signature,
+            {
+                "encoding": "jsonParsed",
+                "commitment": self.commitment,
+                "maxSupportedTransactionVersion": 0
+            }
+        ]);
+
+        let response: RpcResponse<TransactionResult> =
+            self.rpc_call("getTransaction", params).await?;
+        if let Some(err) = response.error {
+            return Err(anyhow!("RPC error {}: {}", err.code, err.message));
+        }
+        Ok(response.result)
     }
 
     async fn rpc_call<T: serde::de::DeserializeOwned>(
@@ -252,95 +254,4 @@ fn extract_mint_to_from_instruction(inst: &Instruction) -> Option<(String, Token
     let accounts = inst.accounts.as_ref()?;
     let mint = accounts.first()?.clone();
     Some((mint, token_program))
-}
-
-fn derive_metadata_pda(mint: &str) -> Result<String> {
-    let mint_bytes = bs58::decode(mint)
-        .into_vec()
-        .context("invalid mint base58")?;
-    let metadata_program = bs58::decode(METAPLEX_METADATA_PROGRAM)
-        .into_vec()
-        .context("invalid metadata program base58")?;
-
-    if mint_bytes.len() != 32 || metadata_program.len() != 32 {
-        return Err(anyhow!("pubkey must be 32 bytes"));
-    }
-
-    let mint_arr: [u8; 32] = mint_bytes.try_into().map_err(|_| anyhow!("invalid mint length"))?;
-    let program_arr: [u8; 32] = metadata_program
-        .try_into()
-        .map_err(|_| anyhow!("invalid program length"))?;
-
-    let (pda, _) = find_program_address(
-        &[
-            b"metadata",
-            program_arr.as_ref(),
-            mint_arr.as_ref(),
-        ],
-        &program_arr,
-    )
-    .context("failed to derive metadata PDA")?;
-
-    Ok(bs58::encode(pda).into_string())
-}
-
-fn find_program_address(seeds: &[&[u8]], program_id: &[u8; 32]) -> Result<([u8; 32], u8)> {
-    for bump in (0u8..=255).rev() {
-        let hash = create_program_address(seeds, bump, program_id);
-        if !is_on_curve(&hash) {
-            return Ok((hash, bump));
-        }
-    }
-    Err(anyhow!("unable to find valid program address bump"))
-}
-
-fn create_program_address(seeds: &[&[u8]], bump: u8, program_id: &[u8; 32]) -> [u8; 32] {
-    let mut hasher = Sha256::new();
-    for seed in seeds {
-        hasher.update(seed);
-    }
-    hasher.update([bump]);
-    hasher.update(program_id);
-    hasher.update(b"ProgramDerivedAddress");
-    hasher.finalize().into()
-}
-
-/// Returns true if the bytes represent a point on the ed25519 curve.
-fn is_on_curve(bytes: &[u8; 32]) -> bool {
-    curve25519_dalek::edwards::CompressedEdwardsY(*bytes)
-        .decompress()
-        .is_some()
-}
-
-fn parse_metaplex_metadata(data: &[u8]) -> (Option<String>, Option<String>) {
-    if data.len() < 65 {
-        return (None, None);
-    }
-
-    let name = read_borsh_string(&data[65..]);
-    let name_len = 4 + name.as_ref().map(|s| s.len()).unwrap_or(0);
-    let symbol_start = 65 + name_len;
-    if symbol_start > data.len() {
-        return (name, None);
-    }
-
-    let symbol = read_borsh_string(&data[symbol_start..]);
-    (name, symbol)
-}
-
-fn read_borsh_string(data: &[u8]) -> Option<String> {
-    if data.len() < 4 {
-        return None;
-    }
-    let len = u32::from_le_bytes(data[..4].try_into().ok()?) as usize;
-    if data.len() < 4 + len {
-        return None;
-    }
-    let raw = &data[4..4 + len];
-    let s = String::from_utf8_lossy(raw).trim_matches('\0').trim().to_string();
-    if s.is_empty() {
-        None
-    } else {
-        Some(s)
-    }
 }

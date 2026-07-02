@@ -3,6 +3,7 @@ mod config;
 mod constants;
 mod dedup;
 mod listener;
+mod metadata;
 mod rpc;
 mod telegram;
 mod types;

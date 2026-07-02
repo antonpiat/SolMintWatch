@@ -17,7 +17,7 @@ cargo run --release
 3. Ignores `InitializeMint` (mint account creation with zero supply) and later re-mints
 3. Dedupes by transaction signature and mint address
 4. Fetches the transaction to extract mint address, creator wallet, and timestamp
-5. Optionally fetches Metaplex name/symbol (2s timeout)
+5. Optionally fetches token name/symbol (2s timeout) — SPL via Metaplex; Token-2022 via [MetadataPointer + TokenMetadata extensions](https://solana.com/docs/tokens/extensions/metadata)
 6. Sends alerts to stdout or Telegram (set via `ALERT_MODE` in `.env`)
 
 ## Configuration
@@ -28,7 +28,7 @@ Secrets and alert routing go in `.env` (see `.env.example`). Other settings are 
 |----------|---------|-------------|
 | `SOLANA_NETWORK` | `mainnet` | `mainnet` or `devnet` |
 | `COMMITMENT` | `confirmed` | RPC commitment level |
-| `FETCH_METADATA` | `true` | Fetch Metaplex name/symbol |
+| `FETCH_METADATA` | `true` | Fetch token name/symbol |
 | `METADATA_TIMEOUT_SECS` | `2` | Metadata fetch timeout |
 | `WS_PING_INTERVAL_SECS` | `30` | WebSocket keepalive interval |
 | `RPC_RETRY_MAX` | `3` | HTTP retry attempts |
@@ -60,6 +60,7 @@ solmintwatch/
     ├── alert.rs
     ├── types.rs
     ├── dedup.rs
+    ├── metadata.rs
     ├── rpc.rs
     ├── listener.rs
     └── telegram.rs
