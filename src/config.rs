@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 
+use crate::alert::AlertMode;
 use crate::constants::{
     COMMITMENT, FETCH_METADATA, METADATA_TIMEOUT_SECS, RPC_RETRY_BASE_MS, RPC_RETRY_MAX,
     SOLANA_NETWORK, WS_PING_INTERVAL_SECS,
@@ -9,8 +10,9 @@ use crate::constants::{
 
 #[derive(Debug, Clone)]
 pub struct Config {
-    pub telegram_bot_token: String,
-    pub telegram_chat_id: String,
+    pub alert_mode: AlertMode,
+    pub telegram_bot_token: Option<String>,
+    pub telegram_chat_id: Option<String>,
     pub rpc_url: String,
     pub ws_url: String,
     pub commitment: String,
@@ -26,8 +28,15 @@ impl Config {
         dotenvy::dotenv().ok();
 
         let helius_api_key = require_env("HELIUS_API_KEY")?;
-        let telegram_bot_token = require_env("TELEGRAM_BOT_TOKEN")?;
-        let telegram_chat_id = require_env("TELEGRAM_CHAT_ID")?;
+        let alert_mode = AlertMode::parse(&require_env("ALERT_MODE")?)?;
+
+        let (telegram_bot_token, telegram_chat_id) = match alert_mode {
+            AlertMode::Stdout => (None, None),
+            AlertMode::Telegram => (
+                Some(require_env("TELEGRAM_BOT_TOKEN")?),
+                Some(require_env("TELEGRAM_CHAT_ID")?),
+            ),
+        };
 
         let (rpc_host, ws_host) = match SOLANA_NETWORK {
             "mainnet" => ("mainnet.helius-rpc.com", "mainnet.helius-rpc.com"),
@@ -39,6 +48,7 @@ impl Config {
         let ws_url = format!("wss://{ws_host}/?api-key={helius_api_key}");
 
         Ok(Self {
+            alert_mode,
             telegram_bot_token,
             telegram_chat_id,
             rpc_url,

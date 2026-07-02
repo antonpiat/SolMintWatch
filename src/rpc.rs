@@ -11,7 +11,7 @@ use crate::config::Config;
 use crate::constants::METAPLEX_METADATA_PROGRAM;
 use crate::types::{
     AccountInfoResult, Instruction, MintEvent, RpcResponse, TokenProgram, TransactionResult,
-    is_initialize_mint_type,
+    is_first_supply_mint, is_mint_to_type,
 };
 
 #[derive(Clone)]
@@ -52,7 +52,9 @@ impl HeliusRpc {
             }
         };
 
-        if tx.meta.as_ref().and_then(|m| m.err.as_ref()).is_some() {
+        let meta = tx.meta.as_ref().ok_or_else(|| anyhow!("transaction meta missing"))?;
+
+        if meta.err.is_some() {
             debug!(signature, "skipping failed transaction");
             return Ok(None);
         }
@@ -69,35 +71,31 @@ impl HeliusRpc {
             .map(|k| k.pubkey().to_string())
             .ok_or_else(|| anyhow!("no account keys in transaction"))?;
 
-        let mut mint: Option<String> = None;
-        let mut program = TokenProgram::Spl;
+        let mut candidates = Vec::new();
 
         for inst in &message.instructions {
-            if let Some((found, prog)) = extract_mint_from_instruction(inst) {
-                mint = Some(found);
-                program = prog;
-                break;
+            if let Some(found) = extract_mint_to_from_instruction(inst) {
+                candidates.push(found);
             }
         }
 
-        if mint.is_none()
-            && let Some(inner_groups) = tx.meta.as_ref().and_then(|m| m.inner_instructions.as_ref())
-        {
-            'outer: for group in inner_groups {
+        if let Some(inner_groups) = meta.inner_instructions.as_ref() {
+            for group in inner_groups {
                 for inst in &group.instructions {
-                    if let Some((found, prog)) = extract_mint_from_instruction(inst) {
-                        mint = Some(found);
-                        program = prog;
-                        break 'outer;
+                    if let Some(found) = extract_mint_to_from_instruction(inst) {
+                        candidates.push(found);
                     }
                 }
             }
         }
 
-        let mint = match mint {
-            Some(m) => m,
+        let (mint, program) = match candidates
+            .into_iter()
+            .find(|(mint, _)| is_first_supply_mint(meta, mint))
+        {
+            Some(found) => found,
             None => {
-                debug!(signature, "no initializeMint instruction found");
+                debug!(signature, "no first-supply mintTo found");
                 return Ok(None);
             }
         };
@@ -236,22 +234,19 @@ impl HeliusRpc {
     }
 }
 
-fn extract_mint_from_instruction(inst: &Instruction) -> Option<(String, TokenProgram)> {
+fn extract_mint_to_from_instruction(inst: &Instruction) -> Option<(String, TokenProgram)> {
     let program_id = inst.program_id.as_deref()?;
     let token_program = TokenProgram::from_program_id(program_id)?;
 
     let parsed = inst.parsed.as_ref()?;
-    if !is_initialize_mint_type(&parsed.inst_type) {
+    if !is_mint_to_type(&parsed.inst_type) {
         return None;
     }
 
-    if let Some(info) = &parsed.info {
-        if let Some(mint) = info.get("mint").and_then(|v| v.as_str()) {
-            return Some((mint.to_string(), token_program));
-        }
-        if let Some(account) = info.get("account").and_then(|v| v.as_str()) {
-            return Some((account.to_string(), token_program));
-        }
+    if let Some(info) = &parsed.info
+        && let Some(mint) = info.get("mint").and_then(|v| v.as_str())
+    {
+        return Some((mint.to_string(), token_program));
     }
 
     let accounts = inst.accounts.as_ref()?;
