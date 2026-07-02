@@ -7,7 +7,8 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tracing::{debug, warn};
 
-use crate::config::{Config, METAPLEX_METADATA_PROGRAM};
+use crate::config::Config;
+use crate::constants::METAPLEX_METADATA_PROGRAM;
 use crate::types::{
     AccountInfoResult, Instruction, MintEvent, RpcResponse, TokenProgram, TransactionResult,
     is_initialize_mint_type,

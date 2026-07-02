@@ -1,4 +1,5 @@
 mod config;
+mod constants;
 mod dedup;
 mod listener;
 mod rpc;
@@ -11,6 +12,7 @@ use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
 use crate::config::Config;
+use crate::constants::RUST_LOG;
 use crate::dedup::DedupStore;
 use crate::listener::Listener;
 use crate::rpc::HeliusRpc;
@@ -20,7 +22,7 @@ use crate::telegram::TelegramClient;
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-            EnvFilter::new(env!("SOLMINTWATCH_RUST_LOG"))
+            EnvFilter::new(RUST_LOG)
         }))
         .init();
 
