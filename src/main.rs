@@ -1,3 +1,4 @@
+mod alert;
 mod config;
 mod constants;
 mod dedup;
@@ -11,12 +12,12 @@ use tokio::sync::watch;
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
+use crate::alert::AlertClient;
 use crate::config::Config;
 use crate::constants::RUST_LOG;
 use crate::dedup::DedupStore;
 use crate::listener::Listener;
 use crate::rpc::HeliusRpc;
-use crate::telegram::TelegramClient;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -28,17 +29,18 @@ async fn main() -> Result<()> {
 
     let config = Config::from_env()?;
     info!(
+        alert_mode = config.alert_mode.label(),
         commitment = %config.commitment,
         fetch_metadata = config.fetch_metadata,
         "starting solmintwatch"
     );
 
     let rpc = HeliusRpc::new(&config)?;
-    let telegram = TelegramClient::new(&config)?;
+    let alerts = AlertClient::new(&config)?;
     let dedup = DedupStore::new();
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    let listener = Listener::new(config, rpc, telegram, dedup, shutdown_rx);
+    let listener = Listener::new(config, rpc, alerts, dedup, shutdown_rx);
 
     tokio::select! {
         result = listener.run() => {

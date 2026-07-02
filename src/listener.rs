@@ -7,12 +7,12 @@ use tokio::sync::watch;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, error, info, warn};
 
+use crate::alert::AlertClient;
 use crate::config::Config;
 use crate::constants::TOKEN_PROGRAMS;
 use crate::dedup::DedupStore;
 use crate::rpc::HeliusRpc;
-use crate::telegram::TelegramClient;
-use crate::types::{is_initialize_mint_log, LogsNotification};
+use crate::types::{is_mint_to_log, LogsNotification};
 
 const WS_RECONNECT_BASE_SECS: u64 = 1;
 const WS_RECONNECT_MAX_SECS: u64 = 60;
@@ -20,7 +20,7 @@ const WS_RECONNECT_MAX_SECS: u64 = 60;
 pub struct Listener {
     config: Config,
     rpc: HeliusRpc,
-    telegram: TelegramClient,
+    alerts: AlertClient,
     dedup: DedupStore,
     shutdown: watch::Receiver<bool>,
 }
@@ -29,14 +29,14 @@ impl Listener {
     pub fn new(
         config: Config,
         rpc: HeliusRpc,
-        telegram: TelegramClient,
+        alerts: AlertClient,
         dedup: DedupStore,
         shutdown: watch::Receiver<bool>,
     ) -> Self {
         Self {
             config,
             rpc,
-            telegram,
+            alerts,
             dedup,
             shutdown,
         }
@@ -56,7 +56,7 @@ impl Listener {
             match run_websocket_session(
                 &self.config,
                 self.rpc.clone(),
-                self.telegram.clone(),
+                self.alerts.clone(),
                 self.dedup.clone(),
                 &mut shutdown,
             )
@@ -99,7 +99,7 @@ impl Listener {
 async fn run_websocket_session(
     config: &Config,
     rpc: HeliusRpc,
-    telegram: TelegramClient,
+    alerts: AlertClient,
     dedup: DedupStore,
     shutdown: &mut watch::Receiver<bool>,
 ) -> Result<()> {
@@ -148,7 +148,7 @@ async fn run_websocket_session(
             msg = read.next() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
-                        handle_ws_message(&text, rpc.clone(), telegram.clone(), dedup.clone()).await;
+                        handle_ws_message(&text, rpc.clone(), alerts.clone(), dedup.clone()).await;
                     }
                     Some(Ok(Message::Ping(payload))) => {
                         if let Err(e) = write.send(Message::Pong(payload)).await {
@@ -174,7 +174,7 @@ async fn run_websocket_session(
 async fn handle_ws_message(
     text: &str,
     rpc: HeliusRpc,
-    telegram: TelegramClient,
+    alerts: AlertClient,
     dedup: DedupStore,
 ) {
     let value: Value = match serde_json::from_str(text) {
@@ -205,18 +205,18 @@ async fn handle_ws_message(
         return;
     }
 
-    if !is_initialize_mint_log(&logs_value.logs) {
+    if !is_mint_to_log(&logs_value.logs) {
         return;
     }
 
     let signature = logs_value.signature;
-    tokio::spawn(process_signature(signature, rpc, telegram, dedup));
+    tokio::spawn(process_signature(signature, rpc, alerts, dedup));
 }
 
 async fn process_signature(
     signature: String,
     rpc: HeliusRpc,
-    telegram: TelegramClient,
+    alerts: AlertClient,
     dedup: DedupStore,
 ) {
     if !dedup.try_insert(&signature).await {
@@ -236,19 +236,19 @@ async fn process_signature(
                 creator = %event.creator,
                 signature = %event.signature,
                 program = event.program.label(),
-                "new mint detected"
+                "first token supply detected"
             );
 
-            if let Err(e) = telegram.send_mint_alert(&event).await {
+            if let Err(e) = alerts.send_mint_alert(&event).await {
                 error!(
                     mint = %event.mint,
                     error = %e,
-                    "failed to send telegram alert"
+                    "failed to send mint alert"
                 );
             }
         }
         Ok(None) => {
-            debug!(signature, "not an initializeMint event");
+            debug!(signature, "not a first-supply mintTo event");
         }
         Err(e) => {
             warn!(signature, error = %e, "failed to process mint event");
