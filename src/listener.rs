@@ -7,7 +7,8 @@ use tokio::sync::watch;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, error, info, warn};
 
-use crate::config::{Config, TOKEN_PROGRAMS};
+use crate::config::Config;
+use crate::constants::TOKEN_PROGRAMS;
 use crate::dedup::DedupStore;
 use crate::rpc::HeliusRpc;
 use crate::telegram::TelegramClient;

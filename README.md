@@ -21,21 +21,21 @@ cargo run --release
 
 ## Configuration
 
-Secrets go in `.env` (see `.env.example`). All other settings are in `Cargo.toml` under `[package.metadata.solmintwatch]`:
+Secrets go in `.env` (see `.env.example`). All other settings are in [`src/constants.rs`](src/constants.rs):
 
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `solana-network` | `mainnet` | `mainnet` or `devnet` |
-| `commitment` | `confirmed` | RPC commitment level |
-| `fetch-metadata` | `true` | Fetch Metaplex name/symbol |
-| `metadata-timeout-secs` | `2` | Metadata fetch timeout |
-| `ws-ping-interval-secs` | `30` | WebSocket keepalive interval |
-| `rpc-retry-max` | `3` | HTTP retry attempts |
-| `rpc-retry-base-ms` | `500` | Retry backoff base (ms) |
-| `rust-log` | `info,solmintwatch=debug` | Default log filter (overridable via `RUST_LOG` env) |
-| `spl-token-program` | `Tokenkeg...` | Classic SPL Token program ID |
-| `token-2022-program` | `TokenzQd...` | Token-2022 program ID |
-| `metaplex-metadata-program` | `metaqbxx...` | Metaplex metadata program ID |
+| Constant | Default | Description |
+|----------|---------|-------------|
+| `SOLANA_NETWORK` | `mainnet` | `mainnet` or `devnet` |
+| `COMMITMENT` | `confirmed` | RPC commitment level |
+| `FETCH_METADATA` | `true` | Fetch Metaplex name/symbol |
+| `METADATA_TIMEOUT_SECS` | `2` | Metadata fetch timeout |
+| `WS_PING_INTERVAL_SECS` | `30` | WebSocket keepalive interval |
+| `RPC_RETRY_MAX` | `3` | HTTP retry attempts |
+| `RPC_RETRY_BASE_MS` | `500` | Retry backoff base (ms) |
+| `RUST_LOG` | `info,solmintwatch=debug` | Default log filter (overridable via `RUST_LOG` env) |
+| `SPL_TOKEN_PROGRAM` | `Tokenkeg...` | Classic SPL Token program ID |
+| `TOKEN_2022_PROGRAM` | `TokenzQd...` | Token-2022 program ID |
+| `METAPLEX_METADATA_PROGRAM` | `metaqbxx...` | Metaplex metadata program ID |
 
 `.env` secrets:
 
@@ -54,6 +54,7 @@ solmintwatch/
 └── src/
     ├── main.rs
     ├── config.rs
+    ├── constants.rs
     ├── types.rs
     ├── dedup.rs
     ├── rpc.rs

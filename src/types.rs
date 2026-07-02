@@ -17,8 +17,8 @@ impl TokenProgram {
 
     pub fn from_program_id(program_id: &str) -> Option<Self> {
         match program_id {
-            crate::config::SPL_TOKEN_PROGRAM => Some(Self::Spl),
-            crate::config::TOKEN_2022_PROGRAM => Some(Self::Token2022),
+            crate::constants::SPL_TOKEN_PROGRAM => Some(Self::Spl),
+            crate::constants::TOKEN_2022_PROGRAM => Some(Self::Token2022),
             _ => None,
         }
     }
