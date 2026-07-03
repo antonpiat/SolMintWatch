@@ -162,6 +162,11 @@ pub fn is_first_supply(supply_now: u64, minted_in_tx: u64) -> bool {
     minted_in_tx > 0 && supply_now.saturating_sub(minted_in_tx) == 0
 }
 
+/// NFTs are minted with a total supply of 1 base unit (decimals 0).
+pub fn is_likely_nft(supply: u64) -> bool {
+    supply == 1
+}
+
 pub fn sum_mint_to_amounts(
     message: &TransactionMessage,
     meta: &TransactionMeta,
@@ -215,6 +220,14 @@ mod supply_tests {
     fn first_supply_when_prior_supply_was_zero() {
         assert!(is_first_supply(1_000, 1_000));
         assert!(is_first_supply(500, 500));
+    }
+
+    #[test]
+    fn likely_nft_when_supply_is_one() {
+        assert!(is_likely_nft(1));
+        assert!(!is_likely_nft(0));
+        assert!(!is_likely_nft(2));
+        assert!(!is_likely_nft(1_000_000_000));
     }
 
     #[test]
