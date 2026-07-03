@@ -1,21 +1,38 @@
+use std::collections::HashSet;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
-use tokio::sync::watch;
+use tokio::sync::{watch, Mutex};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, error, info, warn};
 
 use crate::alert::AlertClient;
-use crate::config::Config;
-use crate::constants::TOKEN_PROGRAMS;
-use crate::dedup::DedupStore;
+use crate::config::{Config, TOKEN_PROGRAMS};
 use crate::rpc::HeliusRpc;
 use crate::types::{is_mint_to_log, LogsNotification};
 
 const WS_RECONNECT_BASE_SECS: u64 = 1;
 const WS_RECONNECT_MAX_SECS: u64 = 60;
+
+#[derive(Clone)]
+struct DedupStore {
+    seen: Arc<Mutex<HashSet<String>>>,
+}
+
+impl DedupStore {
+    fn new() -> Self {
+        Self {
+            seen: Arc::new(Mutex::new(HashSet::new())),
+        }
+    }
+
+    async fn try_insert(&self, key: &str) -> bool {
+        self.seen.lock().await.insert(key.to_string())
+    }
+}
 
 pub struct Listener {
     config: Config,
@@ -30,20 +47,18 @@ impl Listener {
         config: Config,
         rpc: HeliusRpc,
         alerts: AlertClient,
-        dedup: DedupStore,
         shutdown: watch::Receiver<bool>,
     ) -> Self {
         Self {
             config,
             rpc,
             alerts,
-            dedup,
+            dedup: DedupStore::new(),
             shutdown,
         }
     }
 
     pub async fn run(self) -> Result<()> {
-        let mut consecutive_failures = 0u32;
         let mut backoff_secs = WS_RECONNECT_BASE_SECS;
         let mut shutdown = self.shutdown;
 
@@ -53,7 +68,7 @@ impl Listener {
                 return Ok(());
             }
 
-            match run_websocket_session(
+            match run_session(
                 &self.config,
                 self.rpc.clone(),
                 self.alerts.clone(),
@@ -63,18 +78,10 @@ impl Listener {
             .await
             {
                 Ok(()) => {
-                    consecutive_failures = 0;
                     backoff_secs = WS_RECONNECT_BASE_SECS;
-                    warn!("websocket session ended cleanly, reconnecting");
+                    warn!("websocket session ended, reconnecting");
                 }
-                Err(e) => {
-                    consecutive_failures += 1;
-                    warn!(
-                        error = %e,
-                        failures = consecutive_failures,
-                        "websocket session ended"
-                    );
-                }
+                Err(e) => warn!(error = %e, "websocket session ended"),
             }
 
             if *shutdown.borrow() {
@@ -90,13 +97,12 @@ impl Listener {
                     }
                 }
             }
-
             backoff_secs = (backoff_secs * 2).min(WS_RECONNECT_MAX_SECS);
         }
     }
 }
 
-async fn run_websocket_session(
+async fn run_session(
     config: &Config,
     rpc: HeliusRpc,
     alerts: AlertClient,
@@ -135,43 +141,36 @@ async fn run_websocket_session(
         tokio::select! {
             _ = shutdown.changed() => {
                 if *shutdown.borrow() {
-                    info!("websocket session shutting down");
                     let _ = write.close().await;
                     return Ok(());
                 }
             }
             _ = ping_timer.tick() => {
-                if let Err(e) = write.send(Message::Ping(Vec::new().into())).await {
-                    return Err(e).context("websocket ping failed");
-                }
+                write.send(Message::Ping(Vec::new().into())).await
+                    .context("websocket ping failed")?;
             }
             msg = read.next() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
-                        handle_ws_message(&text, rpc.clone(), alerts.clone(), dedup.clone()).await;
+                        handle_message(&text, rpc.clone(), alerts.clone(), dedup.clone()).await;
                     }
                     Some(Ok(Message::Ping(payload))) => {
-                        if let Err(e) = write.send(Message::Pong(payload)).await {
-                            return Err(e).context("websocket pong failed");
-                        }
+                        write.send(Message::Pong(payload)).await
+                            .context("websocket pong failed")?;
                     }
                     Some(Ok(Message::Close(_))) => {
                         return Err(anyhow::anyhow!("websocket closed by server"));
                     }
                     Some(Ok(_)) => {}
-                    Some(Err(e)) => {
-                        return Err(e).context("websocket read error");
-                    }
-                    None => {
-                        return Err(anyhow::anyhow!("websocket stream ended"));
-                    }
+                    Some(Err(e)) => return Err(e).context("websocket read error"),
+                    None => return Err(anyhow::anyhow!("websocket stream ended")),
                 }
             }
         }
     }
 }
 
-async fn handle_ws_message(
+async fn handle_message(
     text: &str,
     rpc: HeliusRpc,
     alerts: AlertClient,
@@ -179,16 +178,10 @@ async fn handle_ws_message(
 ) {
     let value: Value = match serde_json::from_str(text) {
         Ok(v) => v,
-        Err(e) => {
-            debug!(error = %e, "ignoring non-json websocket message");
-            return;
-        }
+        Err(_) => return,
     };
 
     if value.get("method").and_then(|m| m.as_str()) != Some("logsNotification") {
-        if let Some(result) = value.get("result") {
-            debug!(subscription = %result, "subscription acknowledged");
-        }
         return;
     }
 
@@ -201,16 +194,16 @@ async fn handle_ws_message(
     };
 
     let logs_value = notification.params.result.value;
-    if logs_value.err.is_some() {
+    if logs_value.err.is_some() || !is_mint_to_log(&logs_value.logs) {
         return;
     }
 
-    if !is_mint_to_log(&logs_value.logs) {
-        return;
-    }
-
-    let signature = logs_value.signature;
-    tokio::spawn(process_signature(signature, rpc, alerts, dedup));
+    tokio::spawn(process_signature(
+        logs_value.signature,
+        rpc,
+        alerts,
+        dedup,
+    ));
 }
 
 async fn process_signature(
@@ -220,14 +213,12 @@ async fn process_signature(
     dedup: DedupStore,
 ) {
     if !dedup.try_insert(&signature).await {
-        debug!(signature, "duplicate signature skipped");
         return;
     }
 
     match rpc.build_mint_event(&signature).await {
         Ok(Some(event)) => {
             if !dedup.try_insert(&event.mint).await {
-                debug!(mint = %event.mint, "duplicate mint skipped");
                 return;
             }
 
@@ -240,18 +231,23 @@ async fn process_signature(
             );
 
             if let Err(e) = alerts.send_mint_alert(&event).await {
-                error!(
-                    mint = %event.mint,
-                    error = %e,
-                    "failed to send mint alert"
-                );
+                error!(mint = %event.mint, error = %e, "failed to send alert");
             }
         }
-        Ok(None) => {
-            debug!(signature, "not a first-supply mintTo event");
-        }
-        Err(e) => {
-            warn!(signature, error = %e, "failed to process mint event");
-        }
+        Ok(None) => debug!(signature, "not a first-supply mintTo"),
+        Err(e) => warn!(signature, error = %e, "failed to process mint event"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn dedup_rejects_duplicates() {
+        let store = DedupStore::new();
+        assert!(store.try_insert("mint1").await);
+        assert!(!store.try_insert("mint1").await);
+        assert!(store.try_insert("mint2").await);
     }
 }
