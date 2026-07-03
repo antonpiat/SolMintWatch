@@ -94,8 +94,9 @@ Token: https://solscan.io/token/...
 SolMintWatch monitors Solana’s token programs (SPL Token and Token-2022) via Helius WebSocket. When it detects a **first mint** — the initial time supply is created for a token — it:
 
 1. Confirms this is the token’s **first supply** (not a re-mint or empty mint creation)
-2. Looks up token name and symbol when possible (Metaplex for SPL; on-chain metadata for Token-2022)
-3. Sends a formatted alert to your chosen destination
+2. Skips **NFTs** (total supply of 1 base unit)
+3. Looks up token name and symbol when possible (Metaplex for SPL; on-chain metadata for Token-2022)
+4. Sends a formatted alert to your chosen destination
 
 Duplicate events are filtered automatically, so you only see each new token once.
 

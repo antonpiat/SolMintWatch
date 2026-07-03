@@ -11,7 +11,7 @@ use crate::config::{http_backoff, http_client, Config};
 use crate::metadata;
 use crate::types::{
     AccountInfoResult, Instruction, MintEvent, RpcResponse, TokenProgram, TransactionResult,
-    is_first_supply, sum_mint_to_amounts, is_mint_to_type,
+    is_first_supply, is_likely_nft, sum_mint_to_amounts, is_mint_to_type,
 };
 
 #[derive(Clone)]
@@ -97,6 +97,10 @@ impl HeliusRpc {
                     continue;
                 };
                 if is_first_supply(supply, minted) {
+                    if is_likely_nft(supply) {
+                        debug!(mint, supply, "skipping likely NFT (supply == 1)");
+                        continue;
+                    }
                     break 'find (mint, program);
                 }
                 debug!(
