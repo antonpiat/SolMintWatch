@@ -1,11 +1,8 @@
 mod alert;
 mod config;
-mod constants;
-mod dedup;
 mod listener;
 mod metadata;
 mod rpc;
-mod telegram;
 mod types;
 
 use anyhow::Result;
@@ -14,9 +11,7 @@ use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
 use crate::alert::AlertClient;
-use crate::config::Config;
-use crate::constants::RUST_LOG;
-use crate::dedup::DedupStore;
+use crate::config::{Config, RUST_LOG};
 use crate::listener::Listener;
 use crate::rpc::HeliusRpc;
 
@@ -38,10 +33,9 @@ async fn main() -> Result<()> {
 
     let rpc = HeliusRpc::new(&config)?;
     let alerts = AlertClient::new(&config)?;
-    let dedup = DedupStore::new();
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    let listener = Listener::new(config, rpc, alerts, dedup, shutdown_rx);
+    let listener = Listener::new(config, rpc, alerts, shutdown_rx);
 
     tokio::select! {
         result = listener.run() => {

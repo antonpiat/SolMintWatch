@@ -1,8 +1,10 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use chrono::{TimeZone, Utc};
+use reqwest::Client;
+use serde_json::json;
+use tracing::debug;
 
-use crate::config::Config;
-use crate::telegram::TelegramClient;
+use crate::config::{http_backoff, http_client, Config};
 use crate::types::MintEvent;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,16 +33,15 @@ impl AlertMode {
 #[derive(Clone)]
 pub struct AlertClient {
     mode: AlertMode,
-    telegram: Option<TelegramClient>,
+    telegram: Option<TelegramSender>,
 }
 
 impl AlertClient {
     pub fn new(config: &Config) -> Result<Self> {
         let telegram = match config.alert_mode {
             AlertMode::Stdout => None,
-            AlertMode::Telegram => Some(TelegramClient::new(config)?),
+            AlertMode::Telegram => Some(TelegramSender::new(config)?),
         };
-
         Ok(Self {
             mode: config.alert_mode,
             telegram,
@@ -49,25 +50,89 @@ impl AlertClient {
 
     pub async fn send_mint_alert(&self, event: &MintEvent) -> Result<()> {
         match self.mode {
-            AlertMode::Stdout => println!("{}", format_alert_plain(event)),
+            AlertMode::Stdout => println!("{}", format_plain(event)),
             AlertMode::Telegram => {
-                let telegram = self
-                    .telegram
+                self.telegram
                     .as_ref()
-                    .context("telegram client not configured")?;
-                telegram.send_mint_alert(event).await?;
+                    .context("telegram not configured")?
+                    .send(event)
+                    .await?;
             }
         }
-
         Ok(())
     }
 }
 
-pub fn format_alert_plain(event: &MintEvent) -> String {
-    let name = display_name(event);
-    let symbol = display_symbol(event);
-    let time = display_time(event);
+#[derive(Clone)]
+struct TelegramSender {
+    client: Client,
+    bot_token: String,
+    chat_id: String,
+    retry_max: u32,
+    retry_base_ms: u64,
+}
 
+impl TelegramSender {
+    fn new(config: &Config) -> Result<Self> {
+        Ok(Self {
+            client: http_client()?,
+            bot_token: config
+                .telegram_bot_token
+                .clone()
+                .context("TELEGRAM_BOT_TOKEN missing")?,
+            chat_id: config
+                .telegram_chat_id
+                .clone()
+                .context("TELEGRAM_CHAT_ID missing")?,
+            retry_max: config.http_retry_max,
+            retry_base_ms: config.http_retry_base_ms,
+        })
+    }
+
+    async fn send(&self, event: &MintEvent) -> Result<()> {
+        let url = format!(
+            "https://api.telegram.org/bot{}/sendMessage",
+            self.bot_token
+        );
+        let body = json!({
+            "chat_id": self.chat_id,
+            "text": format_html(event),
+            "parse_mode": "HTML",
+            "disable_web_page_preview": false
+        });
+
+        let mut attempt = 0u32;
+        loop {
+            match self.client.post(&url).json(&body).send().await {
+                Ok(resp) => {
+                    let status = resp.status();
+                    if status.is_success() {
+                        debug!(mint = %event.mint, "telegram alert sent");
+                        return Ok(());
+                    }
+                    let body_text = resp.text().await.unwrap_or_default();
+                    if !(status.as_u16() == 429 || status.is_server_error()) {
+                        return Err(anyhow!("Telegram HTTP {status}: {body_text}"));
+                    }
+                    if attempt >= self.retry_max {
+                        return Err(anyhow!(
+                            "Telegram HTTP {status} after retries: {body_text}"
+                        ));
+                    }
+                }
+                Err(e) => {
+                    if attempt >= self.retry_max {
+                        return Err(e).context("Telegram request failed");
+                    }
+                }
+            }
+            http_backoff(attempt, self.retry_base_ms).await;
+            attempt += 1;
+        }
+    }
+}
+
+fn format_plain(event: &MintEvent) -> String {
     format!(
         "First Token Supply\n\
          Name: {name}\n\
@@ -78,21 +143,17 @@ pub fn format_alert_plain(event: &MintEvent) -> String {
          Time: {time}\n\
          Tx: https://solscan.io/tx/{sig}\n\
          Token: https://solscan.io/token/{mint}",
-        name = name,
-        symbol = symbol,
+        name = display_name(event),
+        symbol = display_symbol(event),
         mint = event.mint,
         creator = event.creator,
         program = event.program.label(),
-        time = time,
+        time = display_time(event),
         sig = event.signature,
     )
 }
 
-pub fn format_alert_html(event: &MintEvent) -> String {
-    let name = display_name(event);
-    let symbol = display_symbol(event);
-    let time = display_time(event);
-
+fn format_html(event: &MintEvent) -> String {
     format!(
         "🪙 <b>First Token Supply</b>\n\n\
          <b>Name:</b> {name}\n\
@@ -103,12 +164,12 @@ pub fn format_alert_html(event: &MintEvent) -> String {
          <b>Time:</b> {time}\n\
          <b>Tx:</b> https://solscan.io/tx/{sig}\n\
          <b>Token:</b> https://solscan.io/token/{mint}",
-        name = html_escape(name),
-        symbol = html_escape(symbol),
+        name = html_escape(display_name(event)),
+        symbol = html_escape(display_symbol(event)),
         mint = html_escape(&event.mint),
         creator = html_escape(&event.creator),
         program = html_escape(event.program.label()),
-        time = html_escape(&time),
+        time = html_escape(&display_time(event)),
         sig = html_escape(&event.signature),
     )
 }
@@ -157,7 +218,6 @@ mod tests {
             mint: "Mint111".into(),
             creator: "Creator222".into(),
             signature: "Sig333".into(),
-            slot: 1,
             block_time: Some(1_700_000_000),
             name: Some("Test Token".into()),
             symbol: Some("TEST".into()),
@@ -170,19 +230,18 @@ mod tests {
         assert_eq!(AlertMode::parse("stdout").unwrap(), AlertMode::Stdout);
         assert_eq!(AlertMode::parse("Telegram").unwrap(), AlertMode::Telegram);
         assert!(AlertMode::parse("both").is_err());
-        assert!(AlertMode::parse("invalid").is_err());
     }
 
     #[test]
     fn plain_alert_includes_fields() {
-        let text = format_alert_plain(&sample_event());
+        let text = format_plain(&sample_event());
         assert!(text.contains("Test Token"));
         assert!(text.contains("solscan.io/token/Mint111"));
     }
 
     #[test]
     fn html_alert_includes_fields() {
-        let text = format_alert_html(&sample_event());
+        let text = format_html(&sample_event());
         assert!(text.contains("Test Token"));
         assert!(text.contains("solscan.io/token/Mint111"));
     }

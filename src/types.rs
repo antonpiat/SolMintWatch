@@ -1,6 +1,8 @@
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::config::{SPL_TOKEN_PROGRAM, TOKEN_2022_PROGRAM};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TokenProgram {
     Spl,
@@ -17,8 +19,8 @@ impl TokenProgram {
 
     pub fn from_program_id(program_id: &str) -> Option<Self> {
         match program_id {
-            crate::constants::SPL_TOKEN_PROGRAM => Some(Self::Spl),
-            crate::constants::TOKEN_2022_PROGRAM => Some(Self::Token2022),
+            SPL_TOKEN_PROGRAM => Some(Self::Spl),
+            TOKEN_2022_PROGRAM => Some(Self::Token2022),
             _ => None,
         }
     }
@@ -29,8 +31,6 @@ pub struct MintEvent {
     pub mint: String,
     pub creator: String,
     pub signature: String,
-    #[allow(dead_code)]
-    pub slot: u64,
     pub block_time: Option<i64>,
     pub name: Option<String>,
     pub symbol: Option<String>,
@@ -51,7 +51,6 @@ pub struct RpcError {
 
 #[derive(Debug, Deserialize)]
 pub struct TransactionResult {
-    pub slot: u64,
     #[serde(rename = "blockTime")]
     pub block_time: Option<i64>,
     pub meta: Option<TransactionMeta>,
@@ -63,24 +62,6 @@ pub struct TransactionMeta {
     pub err: Option<Value>,
     #[serde(rename = "innerInstructions")]
     pub inner_instructions: Option<Vec<InnerInstructionGroup>>,
-    #[serde(rename = "preTokenBalances")]
-    pub pre_token_balances: Option<Vec<TokenBalance>>,
-    #[serde(rename = "postTokenBalances")]
-    pub post_token_balances: Option<Vec<TokenBalance>>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct TokenBalance {
-    pub mint: String,
-    #[serde(rename = "uiTokenAmount")]
-    pub ui_token_amount: Option<UiTokenAmount>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct UiTokenAmount {
-    #[serde(rename = "uiAmount")]
-    pub ui_amount: Option<f64>,
-    pub amount: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -103,20 +84,14 @@ pub struct TransactionMessage {
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 pub enum AccountKey {
-    Parsed {
-        pubkey: String,
-        #[allow(dead_code)]
-        signer: Option<bool>,
-        #[allow(dead_code)]
-        writable: Option<bool>,
-    },
+    Parsed { pubkey: String },
     Raw(String),
 }
 
 impl AccountKey {
     pub fn pubkey(&self) -> &str {
         match self {
-            Self::Parsed { pubkey, .. } => pubkey,
+            Self::Parsed { pubkey } => pubkey,
             Self::Raw(s) => s,
         }
     }
@@ -144,24 +119,7 @@ pub struct AccountInfoResult {
 
 #[derive(Debug, Deserialize)]
 pub struct AccountValue {
-    pub data: AccountData,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-pub enum AccountData {
-    Tuple(Vec<String>),
-    #[allow(dead_code)]
-    Parsed(Value),
-}
-
-impl AccountData {
-    pub fn base64_data(&self) -> Option<&str> {
-        match self {
-            Self::Tuple(parts) => parts.first().map(String::as_str),
-            Self::Parsed(_) => None,
-        }
-    }
+    pub data: (String, String),
 }
 
 #[derive(Debug, Deserialize)]
@@ -196,68 +154,109 @@ pub fn is_mint_to_type(inst_type: &str) -> bool {
     matches!(inst_type, "mintTo" | "mintToChecked")
 }
 
-/// True when this transaction is the first time tokens are minted for `mint`
-/// (no pre-tx token accounts held a balance for this mint).
-pub fn is_first_supply_mint(meta: &TransactionMeta, mint: &str) -> bool {
-    let pre = meta.pre_token_balances.as_deref().unwrap_or(&[]);
-    let had_supply = pre
-        .iter()
-        .filter(|b| b.mint == mint)
-        .any(|b| token_amount_positive(&b.ui_token_amount));
-
-    if had_supply {
-        return false;
-    }
-
-    let post = meta.post_token_balances.as_deref().unwrap_or(&[]);
-    post.iter()
-        .filter(|b| b.mint == mint)
-        .any(|b| token_amount_positive(&b.ui_token_amount))
+/// True when this transaction creates the mint's entire on-chain supply so far.
+///
+/// `preTokenBalances` only covers accounts touched in the tx, so we compare mint
+/// account supply: if supply before this tx was zero, `supply_now == minted_in_tx`.
+pub fn is_first_supply(supply_now: u64, minted_in_tx: u64) -> bool {
+    minted_in_tx > 0 && supply_now.saturating_sub(minted_in_tx) == 0
 }
 
-fn token_amount_positive(amount: &Option<UiTokenAmount>) -> bool {
-    match amount {
-        Some(a) => a
-            .ui_amount
-            .map(|v| v > 0.0)
-            .unwrap_or_else(|| a.amount != "0"),
-        None => false,
+pub fn sum_mint_to_amounts(
+    message: &TransactionMessage,
+    meta: &TransactionMeta,
+    mint: &str,
+) -> u64 {
+    let mut total = 0u64;
+    for inst in &message.instructions {
+        total = total.saturating_add(mint_to_amount(inst, mint));
     }
+    if let Some(groups) = &meta.inner_instructions {
+        for group in groups {
+            for inst in &group.instructions {
+                total = total.saturating_add(mint_to_amount(inst, mint));
+            }
+        }
+    }
+    total
+}
+
+fn mint_to_amount(inst: &Instruction, mint: &str) -> u64 {
+    let Some(parsed) = inst.parsed.as_ref() else {
+        return 0;
+    };
+    if !is_mint_to_type(&parsed.inst_type) {
+        return 0;
+    }
+    let Some(info) = parsed.info.as_ref() else {
+        return 0;
+    };
+    if info.get("mint").and_then(|v| v.as_str()) != Some(mint) {
+        return 0;
+    }
+    parse_amount_field(info)
+}
+
+fn parse_amount_field(info: &Value) -> u64 {
+    if let Some(amount) = info.get("amount").and_then(|v| v.as_str()) {
+        return amount.parse().unwrap_or(0);
+    }
+    info.pointer("/tokenAmount/amount")
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
 mod supply_tests {
     use super::*;
 
-    fn balance(mint: &str, amount: &str, ui: f64) -> TokenBalance {
-        TokenBalance {
-            mint: mint.to_string(),
-            ui_token_amount: Some(UiTokenAmount {
-                ui_amount: Some(ui),
-                amount: amount.to_string(),
-            }),
-        }
+    #[test]
+    fn first_supply_when_prior_supply_was_zero() {
+        assert!(is_first_supply(1_000, 1_000));
+        assert!(is_first_supply(500, 500));
     }
 
     #[test]
-    fn first_supply_when_post_has_tokens_and_pre_is_empty() {
-        let meta = TransactionMeta {
-            err: None,
-            inner_instructions: None,
-            pre_token_balances: Some(vec![]),
-            post_token_balances: Some(vec![balance("Mint1", "1000", 1000.0)]),
-        };
-        assert!(is_first_supply_mint(&meta, "Mint1"));
+    fn not_first_supply_when_mint_already_had_supply() {
+        // swap tx: minted 880085237 while supply is already ~10.8B
+        assert!(!is_first_supply(10_827_726_644, 880_085_237));
+        assert!(!is_first_supply(1_500, 500));
     }
 
     #[test]
-    fn not_first_supply_when_pre_already_had_tokens() {
+    fn sums_mint_to_amounts_for_mint() {
+        let mint = "Mint1";
+        let info = |amount: &str| {
+            Some(serde_json::json!({
+                "mint": mint,
+                "amount": amount,
+            }))
+        };
         let meta = TransactionMeta {
             err: None,
-            inner_instructions: None,
-            pre_token_balances: Some(vec![balance("Mint1", "500", 500.0)]),
-            post_token_balances: Some(vec![balance("Mint1", "1500", 1500.0)]),
+            inner_instructions: Some(vec![InnerInstructionGroup {
+                instructions: vec![Instruction {
+                    program_id: None,
+                    accounts: None,
+                    parsed: Some(ParsedInstruction {
+                        inst_type: "mintTo".into(),
+                        info: info("452726679"),
+                    }),
+                }],
+            }]),
         };
-        assert!(!is_first_supply_mint(&meta, "Mint1"));
+        let message = TransactionMessage {
+            account_keys: vec![],
+            instructions: vec![Instruction {
+                program_id: None,
+                accounts: None,
+                parsed: Some(ParsedInstruction {
+                    inst_type: "mintTo".into(),
+                    info: info("427358558"),
+                }),
+            }],
+        };
+        assert_eq!(sum_mint_to_amounts(&message, &meta, mint), 880_085_237);
     }
 }
