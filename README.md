@@ -14,15 +14,15 @@ cargo run --release
 
 1. Subscribes to Helius `logsSubscribe` for **SPL Token** and **Token-2022** programs
 2. Filters for `MintTo` / `MintToChecked`, then verifies **first supply only** (no pre-tx balances for that mint)
-3. Ignores `InitializeMint` (mint account creation with zero supply) and later re-mints
-3. Dedupes by transaction signature and mint address
-4. Fetches the transaction to extract mint address, creator wallet, and timestamp
-5. Optionally fetches token name/symbol (2s timeout) — SPL via Metaplex; Token-2022 via [MetadataPointer + TokenMetadata extensions](https://solana.com/docs/tokens/extensions/metadata)
-6. Sends alerts to stdout or Telegram (set via `ALERT_MODE` in `.env`)
+3. Ignores `InitializeMint` and later re-mints
+4. Dedupes by transaction signature and mint address
+5. Fetches the transaction to extract mint address, creator wallet, and timestamp
+6. Optionally fetches token name/symbol (2s timeout) — SPL via Metaplex; Token-2022 via [MetadataPointer + TokenMetadata](https://solana.com/docs/tokens/extensions/metadata)
+7. Sends alerts to stdout or Telegram (`ALERT_MODE` in `.env`)
 
 ## Configuration
 
-Secrets and alert routing go in `.env` (see `.env.example`). Other settings are in [`src/constants.rs`](src/constants.rs):
+Secrets go in `.env` (see `.env.example`). Other settings are constants at the top of [`src/config.rs`](src/config.rs):
 
 | Constant | Default | Description |
 |----------|---------|-------------|
@@ -31,12 +31,9 @@ Secrets and alert routing go in `.env` (see `.env.example`). Other settings are 
 | `FETCH_METADATA` | `true` | Fetch token name/symbol |
 | `METADATA_TIMEOUT_SECS` | `2` | Metadata fetch timeout |
 | `WS_PING_INTERVAL_SECS` | `30` | WebSocket keepalive interval |
-| `RPC_RETRY_MAX` | `3` | HTTP retry attempts |
-| `RPC_RETRY_BASE_MS` | `500` | Retry backoff base (ms) |
+| `HTTP_RETRY_MAX` | `3` | HTTP retry attempts (RPC + Telegram) |
+| `HTTP_RETRY_BASE_MS` | `500` | Retry backoff base (ms) |
 | `RUST_LOG` | `info,solmintwatch=debug` | Default log filter (overridable via `RUST_LOG` env) |
-| `SPL_TOKEN_PROGRAM` | `Tokenkeg...` | Classic SPL Token program ID |
-| `TOKEN_2022_PROGRAM` | `TokenzQd...` | Token-2022 program ID |
-| `METAPLEX_METADATA_PROGRAM` | `metaqbxx...` | Metaplex metadata program ID |
 
 `.env` variables:
 
@@ -44,26 +41,20 @@ Secrets and alert routing go in `.env` (see `.env.example`). Other settings are 
 |----------|-------------|
 | `HELIUS_API_KEY` | Helius API key |
 | `ALERT_MODE` | `stdout` or `telegram` |
-| `TELEGRAM_BOT_TOKEN` | Telegram bot token (required when `ALERT_MODE=telegram`) |
-| `TELEGRAM_CHAT_ID` | Target chat ID (required when `ALERT_MODE=telegram`) |
+| `TELEGRAM_BOT_TOKEN` | Required when `ALERT_MODE=telegram` |
+| `TELEGRAM_CHAT_ID` | Required when `ALERT_MODE=telegram` |
 
 ## Project layout
 
 ```
-solmintwatch/
-├── Cargo.toml
-├── .env.example
-└── src/
-    ├── main.rs
-    ├── config.rs
-    ├── constants.rs
-    ├── alert.rs
-    ├── types.rs
-    ├── dedup.rs
-    ├── metadata.rs
-    ├── rpc.rs
-    ├── listener.rs
-    └── telegram.rs
+src/
+├── main.rs       entry + shutdown
+├── config.rs     settings, program IDs, shared HTTP helpers
+├── listener.rs   websocket, dedup, event loop
+├── rpc.rs        Helius RPC + mint event builder
+├── metadata.rs   SPL / Token-2022 / Metaplex name resolution
+├── types.rs      MintEvent, RPC types, supply filters
+└── alert.rs      stdout + Telegram alerts
 ```
 
 ## Build

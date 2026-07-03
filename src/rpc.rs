@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
@@ -6,11 +7,11 @@ use reqwest::Client;
 use serde_json::{json, Value};
 use tracing::{debug, warn};
 
-use crate::config::Config;
+use crate::config::{http_backoff, http_client, Config};
 use crate::metadata;
 use crate::types::{
     AccountInfoResult, Instruction, MintEvent, RpcResponse, TokenProgram, TransactionResult,
-    is_first_supply_mint, is_mint_to_type,
+    is_first_supply, sum_mint_to_amounts, is_mint_to_type,
 };
 
 #[derive(Clone)]
@@ -26,19 +27,14 @@ pub struct HeliusRpc {
 
 impl HeliusRpc {
     pub fn new(config: &Config) -> Result<Self> {
-        let client = Client::builder()
-            .timeout(Duration::from_secs(10))
-            .build()
-            .context("failed to build HTTP client")?;
-
         Ok(Self {
-            client,
+            client: http_client()?,
             rpc_url: config.rpc_url.clone(),
             commitment: config.commitment.clone(),
             fetch_metadata: config.fetch_metadata,
             metadata_timeout: config.metadata_timeout,
-            retry_max: config.rpc_retry_max,
-            retry_base_ms: config.rpc_retry_base_ms,
+            retry_max: config.http_retry_max,
+            retry_base_ms: config.http_retry_base_ms,
         })
     }
 
@@ -71,32 +67,47 @@ impl HeliusRpc {
             .ok_or_else(|| anyhow!("no account keys in transaction"))?;
 
         let mut candidates = Vec::new();
-
         for inst in &message.instructions {
-            if let Some(found) = extract_mint_to_from_instruction(inst) {
+            if let Some(found) = extract_mint_to(inst) {
                 candidates.push(found);
             }
         }
-
-        if let Some(inner_groups) = meta.inner_instructions.as_ref() {
-            for group in inner_groups {
+        if let Some(groups) = &meta.inner_instructions {
+            for group in groups {
                 for inst in &group.instructions {
-                    if let Some(found) = extract_mint_to_from_instruction(inst) {
+                    if let Some(found) = extract_mint_to(inst) {
                         candidates.push(found);
                     }
                 }
             }
         }
 
-        let (mint, program) = match candidates
-            .into_iter()
-            .find(|(mint, _)| is_first_supply_mint(meta, mint))
-        {
-            Some(found) => found,
-            None => {
-                debug!(signature, "no first-supply mintTo found");
-                return Ok(None);
+        let mut seen = HashSet::new();
+        let (mint, program) = 'find: {
+            for (mint, program) in candidates {
+                if !seen.insert(mint.clone()) {
+                    continue;
+                }
+                let minted = sum_mint_to_amounts(message, meta, &mint);
+                if minted == 0 {
+                    continue;
+                }
+                let Some(supply) = self.get_mint_supply(&mint).await? else {
+                    debug!(mint, "mint account not found");
+                    continue;
+                };
+                if is_first_supply(supply, minted) {
+                    break 'find (mint, program);
+                }
+                debug!(
+                    mint,
+                    supply,
+                    minted,
+                    "skipping mintTo on mint with existing supply"
+                );
             }
+            debug!(signature, "no first-supply mintTo found");
+            return Ok(None);
         };
 
         let (name, symbol) = if self.fetch_metadata {
@@ -124,7 +135,6 @@ impl HeliusRpc {
             mint,
             creator,
             signature: signature.to_string(),
-            slot: tx.slot,
             block_time: tx.block_time,
             name,
             symbol,
@@ -132,13 +142,31 @@ impl HeliusRpc {
         }))
     }
 
+    pub(crate) async fn get_mint_supply(&self, mint: &str) -> Result<Option<u64>> {
+        let params = json!([
+            mint,
+            { "encoding": "jsonParsed", "commitment": self.commitment }
+        ]);
+
+        let response: RpcResponse<Value> = self.rpc_call("getAccountInfo", params).await?;
+        if let Some(err) = response.error {
+            return Err(anyhow!("RPC error {}: {}", err.code, err.message));
+        }
+
+        let supply = response.result.and_then(|r| {
+            r.get("value")
+                .and_then(|v| v.pointer("/data/parsed/info/supply"))
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.parse().ok())
+        });
+
+        Ok(supply)
+    }
+
     pub(crate) async fn get_account_bytes(&self, address: &str) -> Result<Option<Vec<u8>>> {
         let params = json!([
             address,
-            {
-                "encoding": "base64",
-                "commitment": self.commitment
-            }
+            { "encoding": "base64", "commitment": self.commitment }
         ]);
 
         let response: RpcResponse<AccountInfoResult> =
@@ -147,12 +175,11 @@ impl HeliusRpc {
             return Err(anyhow!("RPC error {}: {}", err.code, err.message));
         }
 
-        let data_b64 = response
+        let Some(data_b64) = response
             .result
             .and_then(|r| r.value)
-            .and_then(|v| v.data.base64_data().map(str::to_string));
-
-        let Some(data_b64) = data_b64 else {
+            .map(|v| v.data.0)
+        else {
             return Ok(None);
         };
 
@@ -195,12 +222,7 @@ impl HeliusRpc {
 
         let mut attempt = 0u32;
         loop {
-            let response = self
-                .client
-                .post(&self.rpc_url)
-                .json(&body)
-                .send()
-                .await;
+            let response = self.client.post(&self.rpc_url).json(&body).send().await;
 
             match response {
                 Ok(resp) => {
@@ -209,7 +231,7 @@ impl HeliusRpc {
                         if attempt >= self.retry_max {
                             return Err(anyhow!("RPC HTTP {status} after retries"));
                         }
-                        self.backoff(attempt).await;
+                        http_backoff(attempt, self.retry_base_ms).await;
                         attempt += 1;
                         continue;
                     }
@@ -223,23 +245,17 @@ impl HeliusRpc {
                     if attempt >= self.retry_max {
                         return Err(e).with_context(|| format!("RPC request failed for {method}"));
                     }
-                    self.backoff(attempt).await;
+                    http_backoff(attempt, self.retry_base_ms).await;
                     attempt += 1;
                 }
             }
         }
     }
-
-    async fn backoff(&self, attempt: u32) {
-        let delay = self.retry_base_ms.saturating_mul(1u64 << attempt.min(6));
-        tokio::time::sleep(Duration::from_millis(delay)).await;
-    }
 }
 
-fn extract_mint_to_from_instruction(inst: &Instruction) -> Option<(String, TokenProgram)> {
+fn extract_mint_to(inst: &Instruction) -> Option<(String, TokenProgram)> {
     let program_id = inst.program_id.as_deref()?;
     let token_program = TokenProgram::from_program_id(program_id)?;
-
     let parsed = inst.parsed.as_ref()?;
     if !is_mint_to_type(&parsed.inst_type) {
         return None;
@@ -251,7 +267,6 @@ fn extract_mint_to_from_instruction(inst: &Instruction) -> Option<(String, Token
         return Some((mint.to_string(), token_program));
     }
 
-    let accounts = inst.accounts.as_ref()?;
-    let mint = accounts.first()?.clone();
+    let mint = inst.accounts.as_ref()?.first()?.clone();
     Some((mint, token_program))
 }

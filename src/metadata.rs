@@ -12,7 +12,7 @@ use spl_token_metadata_interface::{
 };
 use spl_type_length_value::state::{TlvState, TlvStateBorrowed};
 
-use crate::constants::METAPLEX_METADATA_PROGRAM;
+use crate::config::METAPLEX_METADATA_PROGRAM;
 use crate::rpc::HeliusRpc;
 use crate::types::TokenProgram;
 
