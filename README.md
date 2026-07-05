@@ -149,5 +149,3 @@ src/
 ├── types.rs      MintEvent, RPC types, supply filters
 └── alert.rs      stdout + Telegram alerts
 ```
-
-Requires Rust 1.96+ (edition 2024).
