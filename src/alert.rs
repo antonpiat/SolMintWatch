@@ -1,10 +1,10 @@
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use chrono::{TimeZone, Utc};
 use reqwest::Client;
 use serde_json::json;
 use tracing::debug;
 
-use crate::config::{http_backoff, http_client, Config};
+use crate::config::{Config, http_backoff, http_client};
 use crate::types::MintEvent;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,10 +90,7 @@ impl TelegramSender {
     }
 
     async fn send(&self, event: &MintEvent) -> Result<()> {
-        let url = format!(
-            "https://api.telegram.org/bot{}/sendMessage",
-            self.bot_token
-        );
+        let url = format!("https://api.telegram.org/bot{}/sendMessage", self.bot_token);
         let body = json!({
             "chat_id": self.chat_id,
             "text": format_html(event),
@@ -115,9 +112,7 @@ impl TelegramSender {
                         return Err(anyhow!("Telegram HTTP {status}: {body_text}"));
                     }
                     if attempt >= self.retry_max {
-                        return Err(anyhow!(
-                            "Telegram HTTP {status} after retries: {body_text}"
-                        ));
+                        return Err(anyhow!("Telegram HTTP {status} after retries: {body_text}"));
                     }
                 }
                 Err(e) => {

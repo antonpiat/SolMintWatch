@@ -1,17 +1,17 @@
 use std::collections::HashSet;
 use std::time::Duration;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use base64::Engine;
 use reqwest::Client;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tracing::{debug, warn};
 
-use crate::config::{http_backoff, http_client, Config};
+use crate::config::{Config, http_backoff, http_client};
 use crate::metadata;
 use crate::types::{
     AccountInfoResult, Instruction, MintEvent, RpcResponse, TokenProgram, TransactionResult,
-    is_first_supply, is_likely_nft, sum_mint_to_amounts, is_mint_to_type,
+    is_first_supply, is_likely_nft, is_mint_to_type, sum_mint_to_amounts,
 };
 
 #[derive(Clone)]
@@ -47,7 +47,10 @@ impl HeliusRpc {
             }
         };
 
-        let meta = tx.meta.as_ref().ok_or_else(|| anyhow!("transaction meta missing"))?;
+        let meta = tx
+            .meta
+            .as_ref()
+            .ok_or_else(|| anyhow!("transaction meta missing"))?;
 
         if meta.err.is_some() {
             debug!(signature, "skipping failed transaction");
@@ -105,9 +108,7 @@ impl HeliusRpc {
                 }
                 debug!(
                     mint,
-                    supply,
-                    minted,
-                    "skipping mintTo on mint with existing supply"
+                    supply, minted, "skipping mintTo on mint with existing supply"
                 );
             }
             debug!(signature, "no first-supply mintTo found");
@@ -179,11 +180,7 @@ impl HeliusRpc {
             return Err(anyhow!("RPC error {}: {}", err.code, err.message));
         }
 
-        let Some(data_b64) = response
-            .result
-            .and_then(|r| r.value)
-            .map(|v| v.data.0)
-        else {
+        let Some(data_b64) = response.result.and_then(|r| r.value).map(|v| v.data.0) else {
             return Ok(None);
         };
 

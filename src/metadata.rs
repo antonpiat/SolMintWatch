@@ -1,10 +1,7 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use sha2::{Digest, Sha256};
 use spl_token_2022_interface::{
-    extension::{
-        metadata_pointer::MetadataPointer,
-        BaseStateWithExtensions, StateWithExtensions,
-    },
+    extension::{BaseStateWithExtensions, StateWithExtensions, metadata_pointer::MetadataPointer},
     state::Mint,
 };
 use spl_token_metadata_interface::{
@@ -151,17 +148,15 @@ fn derive_metadata_pda(mint: &str) -> Result<String> {
         return Err(anyhow!("pubkey must be 32 bytes"));
     }
 
-    let mint_arr: [u8; 32] = mint_bytes.try_into().map_err(|_| anyhow!("invalid mint length"))?;
+    let mint_arr: [u8; 32] = mint_bytes
+        .try_into()
+        .map_err(|_| anyhow!("invalid mint length"))?;
     let program_arr: [u8; 32] = metadata_program
         .try_into()
         .map_err(|_| anyhow!("invalid program length"))?;
 
     let (pda, _) = find_program_address(
-        &[
-            b"metadata",
-            program_arr.as_ref(),
-            mint_arr.as_ref(),
-        ],
+        &[b"metadata", program_arr.as_ref(), mint_arr.as_ref()],
         &program_arr,
     )
     .context("failed to derive metadata PDA")?;
@@ -221,12 +216,11 @@ fn read_borsh_string(data: &[u8]) -> Option<String> {
         return None;
     }
     let raw = &data[4..4 + len];
-    let s = String::from_utf8_lossy(raw).trim_matches('\0').trim().to_string();
-    if s.is_empty() {
-        None
-    } else {
-        Some(s)
-    }
+    let s = String::from_utf8_lossy(raw)
+        .trim_matches('\0')
+        .trim()
+        .to_string();
+    if s.is_empty() { None } else { Some(s) }
 }
 
 #[cfg(test)]

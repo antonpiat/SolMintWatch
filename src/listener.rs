@@ -4,15 +4,15 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
-use serde_json::{json, Value};
-use tokio::sync::{watch, Mutex};
+use serde_json::{Value, json};
+use tokio::sync::{Mutex, watch};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, error, info, warn};
 
 use crate::alert::AlertClient;
 use crate::config::{Config, TOKEN_PROGRAMS};
 use crate::rpc::HeliusRpc;
-use crate::types::{is_mint_to_log, LogsNotification};
+use crate::types::{LogsNotification, is_mint_to_log};
 
 const WS_RECONNECT_BASE_SECS: u64 = 1;
 const WS_RECONNECT_MAX_SECS: u64 = 60;
@@ -170,12 +170,7 @@ async fn run_session(
     }
 }
 
-async fn handle_message(
-    text: &str,
-    rpc: HeliusRpc,
-    alerts: AlertClient,
-    dedup: DedupStore,
-) {
+async fn handle_message(text: &str, rpc: HeliusRpc, alerts: AlertClient, dedup: DedupStore) {
     let value: Value = match serde_json::from_str(text) {
         Ok(v) => v,
         Err(_) => return,
@@ -198,12 +193,7 @@ async fn handle_message(
         return;
     }
 
-    tokio::spawn(process_signature(
-        logs_value.signature,
-        rpc,
-        alerts,
-        dedup,
-    ));
+    tokio::spawn(process_signature(logs_value.signature, rpc, alerts, dedup));
 }
 
 async fn process_signature(
